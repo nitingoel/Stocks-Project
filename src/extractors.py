@@ -1,13 +1,19 @@
+import multiprocessing
+from multiprocessing import Process
 from abc import ABCMeta, abstractmethod
 from datetime import date
 from utilities import DateValidator
 import urllib2
 import threading
+import settings
 		
 class ParallelThreadRunner(threading.Thread):
-	def __init__(self, threadID, name, extractor, symbolArray, outFileArray, errorFile, start, end):
+	""" This class represents a single instance of a running thread"""
+	
+	def __init__(self, threadID, procID, name, extractor, symbolArray, outFileArray, errorFile, start, end):
 		threading.Thread.__init__(self)
 		self.threadID = threadID
+		self.prodID = procID
 		self.name = name
 		self.linearExtractor = extractor
 		self.symbolArray = symbolArray
@@ -28,15 +34,62 @@ class ParallelThreadRunner(threading.Thread):
 		if (start < 0 or end < start or end > (len(outFileArray)-1)) :
 			raise Exception("Incorrect bounds send to thread for execution")
 
-		error_file = open(errorFile+"_"+str(self.threadID), "w")
-		for x in range(start, end):
+		error_file = open(errorFile, "w")
+		for x in range(start, end+1):
 			#print("Thread ",self.threadID, " named ",self.name, " downloading data for symbol ",symbolArray[x])
 			try:
 				self.linearExtractor.getSymbolDataToFile(symbolArray[x], outFileArray[x])
+				error_file.write(symbolArray[x]+"\tThread: " + self.name + " successfully downloaded data for symbol " + symbolArray[x] + "\n")
 			except Exception as e:
-				error_file.write("Thread: "+self.name+" - Error downloading data for " + symbolArray[x]  + " - " +str(e))
-				error_file.flush()
+				error_file.write(symbolArray[x]+"\tThread: "+self.name+" - Error downloading data for " + symbolArray[x]  + " - " +str(e))
+			error_file.flush()
+
+
+class ParallelProcessRunner:
+	""" This class represents a single instance of a running process """
+	def __init__(self,extractor):
+		self.LinearExtractor = extractor
+	
+	def launchThreadsForProcess(self, symbolArray, outFileArray, errorFile, procid, numThreads, proc_start, proc_end):
+		if (numThreads > settings.MAX_THREADS):
+			numThreads = settings.MAX_THREADS
+		if (len(symbolArray) < 1 or len(outFileArray) < 1 or len(symbolArray) != len(outFileArray)) :
+			raise Exception("Incorrect size of symbol or outputfile arrays")
+		if (len(symbolArray)-1) < proc_end:
+			proc_end = len(symbolArray)-1
+		if (proc_start < 0 or proc_end < proc_start or proc_end > (len(outFileArray)-1)) :
+			raise Exception("Incorrect bounds send to thread for execution")
 				
+		assignedArraySize = proc_end-proc_start+1
+		sliceSize = assignedArraySize/numThreads if assignedArraySize%numThreads == 0 else assignedArraySize/(numThreads-1)
+		print "For process ",procid," assignedArraySize = ",assignedArraySize," and sliceSize = ",sliceSize,'\n'
+		mythreads = []
+		for x in range(numThreads):
+			threadName = "Proc-"+str(procid)+"-Thread-"+str(x)
+			thread_start = proc_start + sliceSize * x
+			if (x == numThreads-1):
+				print "Last thread will go with a length of : ",assignedArraySize%(numThreads-1)," instead of the sliceSize of ",sliceSize, "\n"
+				thread_end = thread_start + (assignedArraySize%(numThreads-1)) - 1
+			else:
+				thread_end = thread_start + sliceSize -1 
+			th = ParallelThreadRunner(x, procid, threadName, self.LinearExtractor, symbolArray, outFileArray, errorFile+"_"+str(x), thread_start, thread_end)
+			print "For Process number "+str(procid)+" Launching thread number "+str(x) + " from "+str(thread_start)+" to "+str(thread_end)+'\n'
+			mythreads.append(th) 
+
+
+		for i in mythreads:
+			i.start()
+		for i in mythreads:
+			i.join()
+
+		try:
+			final_error = open(errorFile, "w")
+			for i in mythreads:
+				err = open(errorFile+"_"+str(i.threadID), "r")
+				final_error.write(err.read())
+		except:
+			print "Error writing output to the final error file \n"
+
 class ParallelExtractor:
 	def __init__(self,extractor):
 		""" 
@@ -45,7 +98,7 @@ class ParallelExtractor:
 		"""
 		self.LinearExtractor = extractor
 	
-	def getSymbolDataToFileInParallel(self, symbolArray, outFileArray, errorFile, numThreads):
+	def getSymbolDataToFileInParallel(self, symbolArray, outFileArray, errorFile, numProcesses, numThreads):
 		"""
 		getSymbolDataToFileInParallel() : Using a linear extractor, launches multiple threads to extract data in parallel
 		Parameters are:
@@ -54,38 +107,47 @@ class ParallelExtractor:
 			errorFile:	An error file where any and all runtime errors are captured.
 			numThreads: An integer value between 1-32 of the number of threads to launch in parallel
 		"""
-		if (numThreads > 32):
-			raise Exception("Too many threads requested")
+		
+		if (numProcesses > settings.MAX_PROCESSES):
+			numThreads = settings.MAX_PROCESSES
+		if (numThreads > settings.MAX_THREADS):
+			numThreads = settings.MAX_THREADS
 		if (len(symbolArray) < 1 or len(outFileArray) < 1 or len(symbolArray) != len(outFileArray)) :
 			raise Exception("Incorrect size of symbol or outputfile arrays")
 		
-		print "Total symbols to check are : "+str(len(symbolArray))+'\n'
+		print "Total symbols to download are : "+str(len(symbolArray))+'\n'
 		
-		sliceSize = len(symbolArray)/numThreads if len(symbolArray)%numThreads == 0 else len(symbolArray)/(numThreads-1)
-		mythreads = []
-		for x in range(0, numThreads):
-			threadName = "Thread"+str(x)
+		sliceSize = len(symbolArray)/numProcesses if len(symbolArray)%numProcesses == 0 else len(symbolArray)/(numProcesses-1)
+		myprocs = []
+		for x in range(numProcesses):
+			procName = "Process"+str(x)
 			start = sliceSize * x
-			end = start + sliceSize -1 if (start+sliceSize < len(symbolArray)) else start + len(symbolArray)%numThreads - 1
-			th = ParallelThreadRunner(x, threadName, self.LinearExtractor, symbolArray, outFileArray, errorFile, start, end)
-			print "Launching thread number "+str(x) + "from "+str(start)+" to "+str(end)+'\n'
-			mythreads.append(th) 
+			if (x==numProcesses-1 and len(symbolArray)%numProcesses != 0):
+				print "Last Process will go with a length of : ",len(symbolArray)%(numProcesses-1)," instead of the sliceSize of ",sliceSize, "\n"
+				end = start + len(symbolArray)%(numProcesses-1) - 1
+			else:
+				end = start + sliceSize -1  
+			ppr = ParallelProcessRunner(self.LinearExtractor)
+			pr = Process(target= ppr.launchThreadsForProcess, args=(symbolArray, outFileArray, errorFile+"_"+str(x), x, numThreads, start, end)) 
+			pr.procID = x
+			print "Launching Process number "+str(x) + "from "+str(start)+" to "+str(end)+'\n'
+			myprocs.append(pr) 
 
-		for i in mythreads:
+		for i in myprocs:
 			i.start()
 
 		""" Awaiting the threads to complete execution """
-		for i in mythreads:
+		for i in myprocs:
 			i.join()
 		
 		try:
 			final_error = open(errorFile, "w")
-			for i in mythreads:
-				err = open(errorFile+"_"+str(i.threadID), "r")
+			for i in myprocs:
+				err = open(errorFile+"_"+str(i.procID), "r")
 				final_error.write(err.read())
 		except:
 			print "Error writing output to the final error file \n"
-		
+
 		
 class ExtractorFactory:
 	def getExtractor(self, oType):
@@ -187,8 +249,6 @@ class YahooExtractor(BaseExtractor):
 			data = data+line
 		return data
 	#//] getSymbolData()
-	
-	
 	
 #//] Class YahooExtractor
 

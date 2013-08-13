@@ -1,4 +1,4 @@
-import os.path
+import multiprocessing
 from extractors import ExtractorFactory
 from extractors import ParallelExtractor
 from time import time
@@ -36,10 +36,12 @@ extractor = ExtractorFactory().getExtractor("yahoo")
 extractor.setEndDate(31, 12, 2013)
 extractor.setStartDate(1, 1, 2005)
 
-pExtractor = ParallelExtractor(extractor)
-pExtractor.getSymbolDataToFileInParallel(symbols, oFiles, 'errors.txt', 32)
 
-t1 = time()
-print 'function vers1 takes %f' %(t1-t0)
+if __name__ == '__main__':    
+	multiprocessing.freeze_support()
+	pExtractor = ParallelExtractor(extractor)
+	pExtractor.getSymbolDataToFileInParallel(symbols, oFiles, errorFile='errors.txt', numProcesses=4, numThreads=32)
+	t1 = time()
+	print 'Time taken for execution is %f' %(t1-t0)
 
 print "All Done"
